@@ -1,0 +1,158 @@
+----------------------------------------------------------------------------------------------------------
+--
+-- xxx.hql
+--
+-- AUTOR...: Frederico Camargo
+-- DATA....: 28/12/2017
+-- VERSAO...: 1.0
+-- COMENTARIO...: Inclusao
+--
+-- OBJETIVO...: Execucao da carga da tabela campanha
+-- OBSERVACOES...:
+-----------------------------------------------------------------------------------------------------------
+-- set hive.exec.dynamic.partition=true;
+-- set hive.exec.dynamic.partition.mode=nonstrict;
+-- set hive.exec.max.dynamic.partitions.pernode = 10000;
+
+-- Criar as tabelas work
+DROP TABLE IF EXISTS wrkd.t_campanha_01;
+
+CREATE TABLE wrkd.t_campanha_01
+(
+  cod_promo INT, 
+   cod_camp INT,
+   dat_inic_camp INT,
+   cod_midia INT,
+   cod_tipo_camp INT,
+   dat_fim_camp INT,
+   desc_camp STRING,
+   ano_mes_refer INT,
+   dat_input_mk04 INT,
+   flg_promo_filha STRING,
+   dat_movto INT,
+   dat_anterior INT,
+   tp_ope STRING
+);
+
+DROP TABLE IF EXISTS wrkd.t_campanha_02;
+
+CREATE TABLE wrkd.t_campanha_02
+(
+  cod_promo INT, 
+   cod_camp INT,
+   dat_inic_camp INT,
+   cod_midia INT,
+   cod_tipo_camp INT,
+   dat_fim_camp INT,
+   desc_camp STRING,
+   ano_mes_refer INT,
+   dat_input_mk04 INT,
+   flg_promo_filha STRING,
+   dat_ini INT,
+   dat_fim INT,
+   tp_ope STRING
+);
+
+invalidate metadata wrkd.t_campanha_01;
+invalidate metadata wrkd.t_campanha_02;
+
+-- CARGA DE T_CAMPANHA
+-- USAR IMPALA
+
+------------- step 01
+
+-- -- Carga da T_CAMPANHA_01
+TRUNCATE TABLE wrkd.t_campanha_01;
+INSERT INTO wrkd.t_campanha_01
+(cod_promo, cod_camp, dat_inic_camp, cod_midia, cod_tipo_camp,
+   dat_fim_camp , desc_camp, ano_mes_refer, dat_input_mk04, flg_promo_filha, 
+   dat_movto, dat_anterior, tp_ope)
+SELECT cast(T1.cod_promocao AS INT),
+       cast(T1.cod_calend_oferta AS INT),
+       cast(T1.dat_inic_promocao AS INT),
+       cast(T1.cod_midia AS INT),
+       cast(T1.cod_tipo_promocao AS INT),
+       cast(T1.dat_final_promocao AS INT),
+       T1.descr_promocao,
+       cast(T1.ano_mes_referencia AS INT),
+       dt_input_mk04 AS dat_input_mk04,
+       T1.flg_promocao_filha AS flg_promo_filha,
+       --cast(from_unixtime(unix_timestamp(),'yyyyMMdd') AS INT) AS dat_movto,
+       T1.data_referencia as dat_movto,
+       --cast(from_timestamp(date_add(from_unixtime(unix_timestamp()),-1), 'yyyyMMdd') as INT) as dat_anterior,
+       cast(from_timestamp(date_sub(to_timestamp(cast(${VAR:MOVTO} as string),'yyyyMMdd'),1),'yyyyMMdd') as int) as dat_anterior,
+       CASE WHEN T2.cod_promo IS NULL
+             THEN 'I'
+            WHEN T2.cod_promo IS NOT NULL and
+                     (cast(T1.cod_midia AS INT) <> T2.cod_midia OR --retirada verificação de campo chave em 13/02/2018 - Pedro
+                     cast(T1.cod_tipo_promocao AS INT) <> T2.cod_tipo_camp OR
+                     cast(T1.dat_final_promocao AS INT) <> T2.dat_fim_camp OR
+                     T1.descr_promocao <> T2.desc_camp OR
+                     cast(T1.ano_mes_referencia AS INT) <> T2.ano_mes_refer OR
+		     T1.dt_input_mk04 <> T2.dat_input_mk04 OR
+		     cast(T1.flg_promocao_filha as STRING) <> T2.flg_promo_filha
+                       )
+            THEN 'U'
+               ELSE 'N'
+       END as tp_ope 
+FROM rwzd_mk04.td_ac01_dsdpm010_ncampac1 T1
+LEFT JOIN tszd_promo_analit.t_campanha T2 
+    ON cast(T1.cod_promocao as INT) = T2.cod_promo 
+    AND cast(T1.cod_calend_oferta AS INT) = T2.cod_camp
+    AND cast(T1.dat_inic_promocao as INT) = T2.dat_inic_camp
+    AND T2.dat_fim = 21001231
+WHERE t1.data_referencia = ${VAR:MOVTO};
+
+-- Carga da T_CAMPANHA_02    
+TRUNCATE TABLE wrkd.t_campanha_02;
+
+
+------------- step 02
+
+INSERT INTO wrkd.t_campanha_02
+(cod_promo, cod_camp, dat_inic_camp, cod_midia, cod_tipo_camp, dat_fim_camp,
+   desc_camp, ano_mes_refer, dat_input_mk04, flg_promo_filha, dat_ini, dat_fim, tp_ope)
+SELECT 
+    cod_promo, cod_camp, dat_inic_camp, cod_midia, cod_tipo_camp, dat_fim_camp,
+    desc_camp, ano_mes_refer, dat_input_mk04, flg_promo_filha,
+       dat_movto AS dat_ini,
+       CASE
+           WHEN tp_ope = 'I' THEN 21001231
+           WHEN tp_ope = 'U' THEN dat_anterior
+       END AS dat_fim,
+       tp_ope
+FROM wrkd.t_campanha_01
+WHERE tp_ope NOT IN ('N');
+
+
+------------- step 03
+-- Atualiza fim de vigencia
+UPDATE T1
+SET T1.dat_fim = T2.dat_fim
+FROM tszd_promo_analit.t_campanha T1
+JOIN wrkd.t_campanha_02 T2 
+  ON T1.cod_camp = T2.cod_camp 
+ AND T1.cod_promo = T2.cod_promo
+ AND T1.dat_inic_camp = T2.dat_inic_camp
+ AND T1.dat_fim = 21001231
+ AND T2.tp_ope = 'U';
+
+
+------------- step 04
+-- Insert final na T_CAMPANHA
+INSERT INTO tszd_promo_analit.t_campanha 
+(cod_promo, cod_camp, dat_ini, cod_midia, cod_tipo_camp, dat_inic_camp, dat_fim_camp, desc_camp, ano_mes_refer, dat_input_mk04, flg_promo_filha, dat_fim)
+SELECT cod_promo,
+       cod_camp,
+       dat_ini,
+       cod_midia,
+       cod_tipo_camp,
+       dat_inic_camp,
+       dat_fim_camp,
+       desc_camp,
+       ano_mes_refer,
+       dat_input_mk04,
+       flg_promo_filha,
+       21001231 AS dat_fim
+FROM wrkd.t_campanha_02;
+
